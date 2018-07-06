@@ -11,6 +11,10 @@ Write-Host "Author: Johan Lundberg"
 # Global config
 $maxConcurrentJobs = 10         # Number of simultaneous PS jobs to run
 $outputDir = "C:\temp\johan"    # Set this to [string]::Empty if you want to be asked for the path
+$tableName = "USB_" + [DateTime]::Now.Year + [DateTime]::Now.Month + [DateTime]::Now.Day
+$sqlDataBase = "SECOPS"
+$sqlServer = "SERVER"
+$sendResultToDatabase = $true
 
 $jobScriptBlock = {
     param
@@ -77,10 +81,11 @@ $jobScriptBlock = {
             foreach ($serial in $usbSerials)
             {
                 Write-Found "USBSTOR $serial on host $hostname"
+                $keyCreation = [DateTime]::MinValue
                 $usbInfoKey = $usbKey.OpenSubKey($serial)
                 $PartmgrKey = $usbInfoKey.OpenSubKey("Device Parameters\\Partmgr")
                 $diskId = $PartmgrKey.GetValue("DiskId")
-                $keyCreation = Get-KeyCreationDate -handle $usbInfoKey.Handle
+                $keyCreation = Get-KeyCreationDate -handle $usbInfoKey.Handle -serial $serial
                 Write-OutputFile -content ($hostname + ";" + $keyCreation + ";" + $serial + ";" + $diskId + ";" + $usbInfoKey.GetValue("FriendlyName") + ";" + $usbInfoKey.GetValue("Driver") + ";" + $usbInfoKey.GetValue("HardwareId"))
             }
         }
@@ -134,13 +139,14 @@ $jobScriptBlock = {
     {
         param
         (
-            $handle
+            $handle,
+            $serial
         )
-        $cName = New-Object System.Text.StringBuilder $usbInfoKey.Name
+        $cName = New-Object System.Text.StringBuilder $serial
         $cLength = 255
         [long]$tStamp =$null
         $keyQuery = [advapi32]::RegQueryInfoKey(
-            $usbInfoKey.Handle,
+            $handle,
             $cName,
             [ref]$cLength,
             $null,
@@ -174,6 +180,34 @@ $jobScriptBlock = {
         Write-ScriptError "$_system dit not respond to network connection"
     }
 }
+function Invoke-Sqlcmd2 
+{
+    param(
+    [Parameter(Position=0, Mandatory=$true ,ValueFromPipeline = $false)] [string]$ServerInstance,
+    [Parameter(Position=1, Mandatory=$true ,ValueFromPipeline = $false)] [string]$Database,
+	[Parameter(Position=2, Mandatory=$false ,ValueFromPipeline = $false)] [string]$UserName,
+	[Parameter(Position=3, Mandatory=$false ,ValueFromPipeline = $false)] [string]$Password,
+    [Parameter(Position=4, Mandatory=$true ,ValueFromPipeline = $false)] [string]$Query,
+    [Parameter(Position=5, Mandatory=$false ,ValueFromPipeline = $false)] [Int32]$QueryTimeout=30
+    )
+
+    $conn=new-object System.Data.SqlClient.SQLConnection
+	if ($UserName -and $Password)
+	
+   		{ $conn.ConnectionString="Server={0};Database={1};User ID={2};Pwd={3}" -f $ServerInstance,$Database,$UserName,$Password }
+	else
+	    { $conn.ConnectionString="Server={0};Database={1};Integrated Security=True" -f $ServerInstance,$Database  }
+
+    $conn.Open()
+    $cmd=new-object system.Data.SqlClient.SqlCommand($Query,$conn)
+    $cmd.CommandTimeout=$QueryTimeout
+    $ds=New-Object system.Data.DataSet
+    $da=New-Object system.Data.SqlClient.SqlDataAdapter($cmd)
+    [void]$da.fill($ds)
+    $conn.Close()
+    $ds.Tables[0]
+
+}
 function Write-Info
 {
     param
@@ -191,7 +225,7 @@ function Write-OutputFile
         )
         if ($initial)
         {
-            "System;InitialDate;Serial;DiskIdPartmgrFriendlyName;Driver;HardwareId" | Out-File ($outputFile + "\usbresult.txt")
+            "Host;LastUsed;Serial;DiskIdPartmgr;FriendlyName;Driver;HardwareId" | Out-File ($outputDir + "\usbresult.txt")
         }
         if ([string]::IsNullOrEmpty($content))
         {
@@ -226,9 +260,49 @@ function Get-SystemsFromAd
     $result = $dirSearcher.FindAll()
     foreach ($system in $result)
     {
-        Write-Info "Found $($system.Properties["name"]) in AD"
+        #Write-Info "Found $($system.Properties["name"]) in AD"
         $global:systems += $system.Properties["name"]
         
+    }
+}
+function Write-ToDb
+{
+    param
+    (
+        $csvImport
+    )
+    $createTableQuery = @"
+CREATE TABLE [dbo].[$tableName](
+	[Id] [int] IDENTITY(1,1) NOT NULL,
+	[Host] [varchar](500) NOT NULL,
+	[LastUsed] [datetime] NULL,
+	[Serial] [varchar](5000) NULL,
+	[DiskId] [varchar](5000) NULL,
+	[FriendlyName] [varchar](5000) NULL,
+    [Driver] [varchar](5000) NULL,
+	[HardwareId] [varchar](5000) NULL,
+ CONSTRAINT [PK_USB_2018-07-06] PRIMARY KEY CLUSTERED 
+(
+	[Id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+) ON [PRIMARY]
+"@
+    Invoke-Sqlcmd2 -ServerInstance $sqlServer -Database $sqlDataBase -Query $createTableQuery
+    foreach ($row in $csvImport)
+    {
+        $insertQuery = @"
+INSERT INTO [dbo].[$tableName]
+           ([Host]
+           ,[LastUsed]
+           ,[Serial]
+           ,[DiskId]
+           ,[FriendlyName]
+           ,[Driver]
+           ,[HardwareId])
+     VALUES
+           ('$($row.Host)','$($row.LastUsed)','$($row.Serial)','$($row.DiskIdPartmgr)','$($row.FriendlyName.Replace("'",""))','$($row.Driver)','$($row.HardwareId.Replace("'",""))')
+"@
+    Invoke-Sqlcmd2 -ServerInstance $sqlServer -Database $sqlDataBase -Query $insertQuery
     }
 }
 
@@ -276,11 +350,11 @@ if (!(Test-Path $outputDir))
         exit
     }
 }
-if ((Read-Host -Prompt "Start scan? (y/n)") -ne "y")
-{
-    Write-Info "User aborted"
-    exit
-}
+#if ((Read-Host -Prompt "Start scan? (y/n)") -ne "y")
+#{
+#    Write-Info "User aborted"
+#    exit
+#}
 
 Write-OutputFile -content ([string]::Empty) -initial
 foreach ($system in $global:systems)
@@ -297,4 +371,10 @@ foreach ($system in $global:systems)
     }
     Write-Info "Starting job for $system"
     Start-Job -Name "Job_$system" -ScriptBlock $jobScriptBlock -ArgumentList $system,$outputDir
+}
+Start-Sleep -Seconds 60
+if ($sendResultToDatabase)
+{
+    Write-Info "Sleeping before sending result to database"
+    Write-ToDb -csvImport (Import-Csv  ($outputDir + "\usbresult.txt") -Delimiter ";")
 }
