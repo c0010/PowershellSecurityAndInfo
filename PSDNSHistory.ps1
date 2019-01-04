@@ -5,7 +5,7 @@ $logFilePath = "C:\temp\johan.log"
 #=== DNS Zones
 $dnsZones = @("epm.local")
 #=== Output
-#= SQL
+#= SQL # NOT IMPLEMENTED YET
 $isSqlOutputEnabled = $false
 $sqlConnectionString = [string]::Empty
 #= CSV
@@ -13,7 +13,8 @@ $isCsvOutputEnabled = $true
 $csvFilePath = "C:\temp\dnshistory.csv"
 $csvData = $null
 #= Syslog
-
+$syslogServer = $null
+$syslogPort = $null
 
 # Functions
 function Write-Log
@@ -104,7 +105,7 @@ function Write-CsvOutput
     $DnsData | ConvertTo-Csv -Delimiter ";" -NoTypeInformation | Out-File -FilePath $csvFilePath -Encoding utf8
 }
 
-# Variables
+# Classes
 class DnsData
 {
     [string]$HostName
@@ -138,7 +139,7 @@ foreach ($zone in $dnsZones)
     Write-Log -Info "Getting all DNS records for zone"
     #$records = Get-DnsServerResourceRecord -ZoneName $zone | Select-Object Hostname,RecordType -ExpandProperty RecordData
     $records = @()
-    Get-DnsServerResourceRecord -ZoneName $zone | ForEach-Object{
+    Get-DnsServerResourceRecord -ZoneName $zone |Where-Object{$_.RecordType -ne "SRV"} | ForEach-Object{
         $records += Construct-DnsDataClassInstance -DnsData $_
     }
     
@@ -190,6 +191,18 @@ foreach ($zone in $dnsZones)
             }
         }
         Write-CsvOutput -DnsData $csvData
+
+        # Check if any DNS records have been removed
+        $uniqueFromCsv = $csvData | Select-Object Hostname -Unique
+        $uniqueFromServer = $records | Select-Object Hostname -Unique
+        $diff = Compare-Object -ReferenceObject $uniqueFromCsv -DifferenceObject $uniqueFromServer
+        if ($diff.Count -ge 1)
+        {
+            Write-Log -Info "Not all records in csvData was found in the server records, looking which have been removed"
+            $diff | Where-Object{$_.SideIndicator -eq "<="} | %{
+                Write-Log -Info "[ENTRY_REMOVED]" # RESUME HERE ###############################################################
+            }
+        }
     }
 }
 
