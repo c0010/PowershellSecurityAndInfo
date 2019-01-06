@@ -16,6 +16,7 @@ And then query the targets via Win32.Registry* and advapi32 to get information o
 
 # ===== PS DNS History
 Script is meant to be run on a schedule to discover all the DNS records and create a history over records that change IP address or gets deleted.
+Output modes are CSV or SQL.
 If a record gets deleted only the hostname will get logged in the removal log (since it's removed it's complicated to determine what IP address it had :) ) 
 Only integrated authentication to SQL database is used for the moment.
 ### Pre-reqs
